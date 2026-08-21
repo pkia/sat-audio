@@ -1,0 +1,10 @@
+[Unit]
+Description=Satellite audio pull-based deploy job
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ev
+WorkingDirectory=/home/ev/apps/sat-audio
+ExecStart=/home/ev/apps/sat-audio/deploy/deploy.sh
