@@ -1,4 +1,8 @@
-
+# base rules
+__pycache__/
+*.pyc
+*.log
+*.fifo
 # deploy state
 .deployed_commit
 .deploy_failed
