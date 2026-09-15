@@ -11,9 +11,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AUDIO_DIR = "/home/ev/maritime-dashboard/noaa_audio"
-STATE = "/home/ev/maritime-dashboard/noaa_state.json"
-PORT = 8085
+AUDIO_DIR = os.environ.get("SAT_AUDIO_DIR", "/home/ev/maritime-dashboard/noaa_audio")
+STATE = os.environ.get("SAT_AUDIO_STATE", "/home/ev/maritime-dashboard/noaa_state.json")
+PORT = int(os.environ.get("SAT_AUDIO_PORT", "8085"))
 LIVE_SKIP_BYTES = 20 * 1024 * 1024  # ~2 min behind live at 176 kB/s
 
 
