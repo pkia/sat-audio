@@ -15,6 +15,48 @@ AUDIO_DIR = os.environ.get("SAT_AUDIO_DIR", "/home/ev/maritime-dashboard/noaa_au
 STATE = os.environ.get("SAT_AUDIO_STATE", "/home/ev/maritime-dashboard/noaa_state.json")
 PORT = int(os.environ.get("SAT_AUDIO_PORT", "8085"))
 LIVE_SKIP_BYTES = 20 * 1024 * 1024  # ~2 min behind live at 176 kB/s
+CLIENT_TIMEOUT = int(os.environ.get("SAT_AUDIO_CLIENT_TIMEOUT", "90"))  # s
+MAX_STREAMS = int(os.environ.get("SAT_AUDIO_MAX_STREAMS", "6"))
+
+# Encoders currently attached to a listener: {Popen: owning thread}.
+# A listener that goes away mid-stream (phone sleeps, Wi-Fi drops, a probe
+# reads a few KB and closes) must never leave an encoder behind: ffmpeg
+# ignores SIGTERM while it sits in read() on a pipe that will never see
+# EOF again, so it has to be SIGKILLed and its pipes closed by hand.
+STREAMS = {}
+STREAMS_LOCK = threading.Lock()
+
+
+def kill_stream(proc):
+    for stream in (proc.stdin, proc.stdout):
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def reap_orphan_streams():
+    """Safety net: SIGKILL encoders whose handler thread is already gone."""
+    while True:
+        time.sleep(30)
+        with STREAMS_LOCK:
+            dead = [p for p, t in STREAMS.items() if not t.is_alive()]
+            for p in dead:
+                STREAMS.pop(p, None)
+        for p in dead:
+            kill_stream(p)
+
+
+threading.Thread(target=reap_orphan_streams, daemon=True).start()
 
 
 def newest_wav():
@@ -89,12 +131,22 @@ during any capture to listen live.</p>
         self.wfile.write(html)
 
     def send_stream(self):
+        with STREAMS_LOCK:
+            if len(STREAMS) >= MAX_STREAMS:
+                self.send_error(503, "too many listeners")
+                return
         wav = newest_wav()
         if not wav:
             self.send_error(503, "no recordings yet")
             return
         live = capture_live()
         skip = LIVE_SKIP_BYTES if live else 0
+
+        # A vanished peer must not pin this thread (and its encoder) forever.
+        try:
+            self.connection.settimeout(CLIENT_TIMEOUT)
+        except OSError:
+            pass
 
         self.send_response(200)
         self.send_header("Content-Type", "audio/mpeg")
@@ -104,6 +156,8 @@ during any capture to listen live.</p>
         self.end_headers()
 
         stop = threading.Event()
+        proc = None
+        f = None
 
         def pump(src, dst, is_audio):
             try:
@@ -125,11 +179,6 @@ during any capture to listen live.</p>
                 pass
             finally:
                 stop.set()
-                if not is_audio:
-                    try:
-                        src.close()  # stdin of ffmpeg
-                    except Exception:
-                        pass
 
         try:
             f = open(wav, "rb")
@@ -143,6 +192,8 @@ during any capture to listen live.</p>
                  "-f", "mp3", "pipe:1"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=open("/tmp/sat-ffmpeg.log", "ab"))
+            with STREAMS_LOCK:
+                STREAMS[proc] = threading.current_thread()
             threading.Thread(
                 target=pump, args=(f, proc.stdin, False), daemon=True).start()
             pump(proc.stdout, self.wfile, True)
@@ -150,10 +201,15 @@ during any capture to listen live.</p>
             pass
         finally:
             stop.set()
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+            if proc is not None:
+                with STREAMS_LOCK:
+                    STREAMS.pop(proc, None)
+                kill_stream(proc)  # close both pipes, then SIGKILL
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
             try:
                 self.wfile.flush()
             except Exception:
